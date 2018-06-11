@@ -1,236 +1,197 @@
-#!/bin/bash
-TMP_FOLDER='hashrentalcoincore'
-CONFIG_FILE='hashrentalcoin.conf'
-CONFIGFOLDER='/root/.hashrentalcoincore'
-COIN_DAEMON='/usr/local/bin/hashrentalcoind'
-COIN_CLI='/usr/local/bin/hashrentalcoin-cli'
-COIN_REPO='https://github.com/allcaponne/HRC_install_script/blob/master/HRC.tar.gz'
-SENTINEL_REPO='https://github.com/HashRentalCoin/sentinel'
-COIN_NAME='hashrentalcoin'
-COIN_PORT=7883
-NODEIP=$(curl -s4 icanhazip.com)
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
-function install_sentinel() {
-  echo -e "${GREEN}Install sentinel.${NC}"
-  apt-get -y install python-virtualenv virtualenv >/dev/null 2>&1
-  git clone $SENTINEL_REPO /sentinel >/dev/null 2>&1
-  cd /sentinel
-  virtualenv ./venv >/dev/null 2>&1
-  ./venv/bin/pip install -r requirements.txt >/dev/null 2>&1
-  echo  "* * * * * cd /sentinel && ./venv/bin/python bin/sentinel.py >> $CONFIGFOLDER/sentinel.log 2>&1" > $CONFIGFOLDER/$COIN_NAME.cron
-  crontab $CONFIGFOLDER/$COIN_NAME.cron
-  rm $CONFIGFOLDER/$COIN_NAME.cron >/dev/null 2>&1
-  cd -
-}
-function compile_node() {
-  echo -e "Prepare to download $COIN_NAME"
-  cd $TMP_FOLDER
-  wget -q $COIN_REPO
-  compile_error
-  COIN_ZIP=$(echo $COIN_REPO | awk -F'/' '{print $NF}')
-  tar xvzf $COIN_ZIP --strip 1 >/dev/null 2>&1
-  compile_error
-  cp bin/hashrentalcoin* /usr/local/bin
-  compile_error
-  strip $COIN_DAEMON $COIN_CLI
-  cd - >/dev/null 2>&1
-  rm -rf $TMP_FOLDER >/dev/null 2>&1
-  clear
-}
-function configure_systemd() {
-  cat << EOF > /etc/systemd/system/$COIN_NAME.service
-[Unit]
-Description=$COIN_NAME service
-After=network.target
-[Service]
-User=root
-Group=root
-Type=forking
-#PIDFile=$CONFIGFOLDER/$COIN_NAME.pid
-ExecStart=$COIN_DAEMON -conf=$CONFIGFOLDER/$CONFIG_FILE -datadir=$CONFIGFOLDER
-ExecStop=-$COIN_CLI -conf=$CONFIGFOLDER/$CONFIG_FILE -datadir=$CONFIGFOLDER stop
-Restart=always
-PrivateTmp=true
-TimeoutStopSec=60s
-TimeoutStartSec=10s
-StartLimitInterval=120s
-StartLimitBurst=5
-[Install]
-WantedBy=multi-user.target
-EOF
-  systemctl daemon-reload
-  sleep 3
-  systemctl start $COIN_NAME.service
-  systemctl enable $COIN_NAME.service >/dev/null 2>&1
+# Check if is root
+if [ "$(whoami)" != "root" ]; then
+  echo "Script must be run as user: root"
+  exit -1
+fi
 
-  if [[ -z "$(ps axo cmd:100 | egrep $COIN_DAEMON)" ]]; then
-    echo -e "${RED}$COIN_NAME is not running${NC}, please investigate. You should start by running the following commands as root:"
-    echo -e "${GREEN}systemctl start $COIN_NAME.service"
-    echo -e "systemctl status $COIN_NAME.service"
-    echo -e "less /var/log/syslog${NC}"
-    exit 1
-  fi
-}
-function create_config() {
-  mkdir $CONFIGFOLDER >/dev/null 2>&1
-  RPCUSER=$(tr -cd '[:alnum:]' < /dev/urandom | fold -w10 | head -n1)
-  RPCPASSWORD=$(tr -cd '[:alnum:]' < /dev/urandom | fold -w22 | head -n1)
-  cat << EOF > $CONFIGFOLDER/$CONFIG_FILE
-rpcuser=$RPCUSER
-rpcpassword=$RPCPASSWORD
+# Check for systemd
+systemctl --version >/dev/null 2>&1 || { echo "systemd is required. Are you using Ubuntu 16.04 (Xenial)?"  >&2; exit 1; }
+
+# Gather input from user
+KEY=$1
+if [ "$KEY" == "" ]; then
+    echo "Enter your Masternode Private Key"
+    read -e -p "(e.g. 7edfjLCUzGczZi3JQw8GHp434R9kNY33eFyMGeKRymkB56G4324h) : " KEY
+    if [[ "$KEY" == "" ]]; then
+        echo "WARNING: No private key entered, exiting!!!"
+        echo && exit
+    fi
+fi
+IP=$(curl http://icanhazip.com --ipv4)
+PORT="7883"
+if [[ "$IP" == "" ]]; then
+    read -e -p "VPS Server IP Address: " IP
+fi
+echo "Your IP and Port is $IP:$PORT"
+if [ -z "$2" ]; then
+echo && echo "Pressing ENTER will use the default value for the next prompts."
+    echo && sleep 3
+    read -e -p "Add swap space? (Recommended) [Y/n] : " add_swap
+fi
+if [[ ("$add_swap" == "y" || "$add_swap" == "Y" || "$add_swap" == "") ]]; then
+    if [ -z "$2" ]; then
+        read -e -p "Swap Size [2G] : " swap_size
+    fi
+    if [[ "$swap_size" == "" ]]; then
+        swap_size="2G"
+    fi
+fi
+if [ -z "$2" ]; then
+    read -e -p "Install Fail2ban? (Recommended) [Y/n] : " install_fail2ban
+    read -e -p "Install UFW and configure ports? (Recommended) [Y/n] : " UFW
+fi
+
+# Add swap if needed
+if [[ ("$add_swap" == "y" || "$add_swap" == "Y" || "$add_swap" == "") ]]; then
+    if [ ! -f /swapfile ]; then
+        echo && echo "Adding swap space..."
+        sleep 3
+        sudo fallocate -l $swap_size /swapfile
+        sudo chmod 600 /swapfile
+        sudo mkswap /swapfile
+        sudo swapon /swapfile
+        echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+        sudo sysctl vm.swappiness=10
+        sudo sysctl vm.vfs_cache_pressure=50
+        echo 'vm.swappiness=10' | sudo tee -a /etc/sysctl.conf
+        echo 'vm.vfs_cache_pressure=50' | sudo tee -a /etc/sysctl.conf
+    else
+        echo && echo "WARNING: Swap file detected, skipping add swap!"
+        sleep 3
+    fi
+fi
+
+
+# Update system 
+echo && echo "Upgrading system..."
+sleep 3
+sudo apt-get -y update
+sudo apt-get -y upgrade
+
+# Install required packages
+echo && echo "Installing base packages..."
+sleep 3
+sudo apt-get -y install \
+unzip \
+python-virtualenv
+sudo apt -y update && sudo apt -y install build-essential libssl-dev libdb++-dev && sudo apt -y install libboost-all-dev libcrypto++-dev libqrencode-dev && sudo apt -y install libminiupnpc-dev libgmp-dev libgmp3-dev autoconf && sudo apt -y install autogen automake libtool autotools-dev pkg-config && sudo apt -y install bsdmainutils software-properties-common && sudo apt -y install libzmq3-dev libminiupnpc-dev libssl-dev libevent-dev && sudo add-apt-repository ppa:bitcoin/bitcoin -y && sudo apt-get update && sudo apt-get install libdb4.8-dev libdb4.8++-dev -y && sudo apt-get install unzip -y
+sudo apt-get dist-upgrade -y
+sudo apt-get install nano mc htop git ufw p7zip-full libtool autotools-dev automake pkg-config libevent-dev bsdmainutils software-properties-common -y 
+sudo apt-get install libdb-dev autoconf-archive -y
+sudo apt-get install libdb5.3++ libgmp3-dev libzmq3-dev libminiupnpc-dev libssl-dev libevent-dev
+sudo add-apt-repository ppa:bitcoin/bitcoin -y
+sudo apt-get update -y
+sudo apt-get install libdb4.8-dev libdb4.8++-dev -y
+
+# Install fail2ban if needed
+if [[ ("$install_fail2ban" == "y" || "$install_fail2ban" == "Y" || "$install_fail2ban" == "") ]]; then
+    echo && echo "Installing fail2ban..."
+    sleep 3
+    sudo apt-get -y install fail2ban
+    sudo service fail2ban restart 
+fi
+
+# Install firewall if needed
+if [[ ("$UFW" == "y" || "$UFW" == "Y" || "$UFW" == "") ]]; then
+    echo && echo "Installing UFW..."
+    sleep 3
+    sudo apt-get -y install ufw
+    echo && echo "Configuring UFW..."
+    sleep 3
+    sudo ufw default deny incoming
+    sudo ufw default allow outgoing
+    sudo ufw allow ssh
+    sudo ufw allow 10773/tcp
+    sudo ufw allow 7883/tcp
+    echo "y" | sudo ufw enable
+    echo && echo "Firewall installed and enabled!"
+fi
+
+# Create config for hashrentalcoin
+echo && echo "Putting The HashRentalCoin..."
+sleep 3
+sudo mkdir /root/.hashrentalcoin #jm
+
+rpcuser=`cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 32 | head -n 1`
+rpcpassword=`cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 32 | head -n 1`
+sudo touch /root/.hashrentalcoin/hashrentalcoin.conf
+echo '
+rpcuser='$rpcuser'
+rpcpassword='$rpcpassword'
 rpcallowip=127.0.0.1
 listen=1
 server=1
-daemon=1
-port=$COIN_PORT
-EOF
-}
-function create_key() {
-  echo -e "Enter your ${RED}$COIN_NAME Masternode Private Key${NC}. Leave it blank to generate a new ${RED}Masternode Private Key${NC} for you:"
-  read -e COINKEY
-  if [[ -z "$COINKEY" ]]; then
-  $COIN_DAEMON -daemon
-  sleep 30
-  if [ -z "$(ps axo cmd:100 | grep $COIN_DAEMON)" ]; then
-   echo -e "${RED}$COIN_NAME server couldn not start. Check /var/log/syslog for errors.{$NC}"
-   exit 1
-  fi
-  COINKEY=$($COIN_CLI masternode genkey)
-  if [ "$?" -gt "0" ];
-    then
-    echo -e "${RED}Wallet not fully loaded. Let us wait and try again to generate the Private Key${NC}"
-    sleep 30
-    COINKEY=$($COIN_CLI masternode genkey)
-  fi
-  $COIN_CLI stop
-fi
-clear
-}
-function update_config() {
-  cat << EOF >> $CONFIGFOLDER/$CONFIG_FILE
+rpcport=10773
+daemon=0 # required for systemd
+logtimestamps=1
 maxconnections=256
-#bind=$NODEIP
+externalip='$IP:$PORT'
+masternodeprivkey='$KEY'
 masternode=1
-externalip=$NODEIP:$COIN_PORT
-masternodeprivkey=$COINKEY
-addnode=37.143.9.181
-addnode=95.183.13.34
-addnode=185.87.194.125
-addnode=63.142.250.183
-addnode=46.98.69.186
-addnode=31.23.137.65
-EOF
-}
-function enable_firewall() {
-  echo -e "Installing and setting up firewall to allow ingress on port ${GREEN}$COIN_PORT${NC}"
-  ufw allow $COIN_PORT/tcp comment "$COIN_NAME MN port" >/dev/null
-  ufw allow ssh comment "SSH" >/dev/null 2>&1
-  ufw limit ssh/tcp >/dev/null 2>&1
-  ufw default allow outgoing >/dev/null 2>&1
-  echo "y" | ufw enable >/dev/null 2>&1
-}
-function get_ip() {
-  declare -a NODE_IPS
-  for ips in $(netstat -i | awk '!/Kernel|Iface|lo/ {print $1," "}')
-  do
-    NODE_IPS+=($(curl --interface $ips --connect-timeout 2 -s4 icanhazip.com))
-  done
-  if [ ${#NODE_IPS[@]} -gt 1 ]
-    then
-      echo -e "${GREEN}More than one IP. Please type 0 to use the first IP, 1 for the second and so on...${NC}"
-      INDEX=0
-      for ip in "${NODE_IPS[@]}"
-      do
-        echo ${INDEX} $ip
-        let INDEX=${INDEX}+1
-      done
-      read -e choose_ip
-      NODEIP=${NODE_IPS[$choose_ip]}
-  else
-    NODEIP=${NODE_IPS[0]}
-  fi
-}
-function compile_error() {
-if [ "$?" -gt "0" ];
- then
-  echo -e "${RED}Failed to compile $COIN_NAME. Please investigate.${NC}"
-  exit 1
+' | sudo -E tee /root/.hashrentalcoin/hashrentalcoin.conf
+
+
+#Download pre-compiled hashrentalcoin and run
+mkdir hashrentalcoin 
+mkdir hashrentalcoin/src
+cd hashrentalcoin/src
+#Select OS architecture
+    if [ `getconf LONG_BIT` = "64" ]
+        then
+            wget https://github.com/HashRentalCoin/hashrentalcoin/releases/download/1/ubuntu_auto.zip
+            unzip ubuntu_auto.zip
+    else
+        wget wget https://github.com/HashRentalCoin/hashrentalcoin/releases/download/1/ubuntu_auto.zip
+        unzip unzip ubuntu_auto.zip
+    fi
+chmod +x hashrentalcoind
+chmod +x hashrentalcoin-cli
+chmod +x hashrentalcoin-tx
+
+# Move binaries do lib folder
+sudo mv hashrentalcoin-cli /usr/bin/hashrentalcoin-cli
+sudo mv hashrentalcoin-tx /usr/bin/hashrentalcoin-tx
+sudo mv hashrentalcoind /usr/bin/hashrentalcoind
+
+#run daemon
+hashrentalcoind -daemon -datadir=/root/.hashrentalcoin
+
+TOTALBLOCKS=$(curl http://95.181.230.26:3001/api/getblockcount)
+
+sleep 10
+
+# Download and install sentinel
+echo && echo "Installing Sentinel..."
+sleep 3
+cd
+sudo apt-get -y install python3-pip
+sudo pip3 install virtualenv
+sudo git clone https://github.com/HashRentalCoin/sentinel /root/sentinel
+cd /root/sentinel
+virtualenv venv
+. venv/bin/activate
+pip install -r requirements.txt
+export EDITOR=nano
+(crontab -l -u root 2>/dev/null; echo '* * * * * cd /root/sentinel && ./venv/bin/python bin/sentinel.py >/dev/null 2>&1') | sudo crontab -u root -
+
+# Create a cronjob for making sure hashrentalcoind runs after reboot
+if ! crontab -l | grep "@reboot hashrentalcoind -daemon"; then
+  (crontab -l ; echo "@reboot hashrentalcoind -daemon") | crontab -
 fi
-}
-function checks() {
-if [[ $(lsb_release -d) != *16.04* ]]; then
-  echo -e "${RED}You are not running Ubuntu 16.04. Installation is cancelled.${NC}"
-  exit 1
+
+# cd to hashrentalcoin-cli for final, no real need to run cli with commands as service when you can just cd there
+echo && echo "hashrentalcoin Masternode Setup Complete!"
+echo && echo "Now we will wait until the node get full sync."
+
+$COUNTER=0
+sleep 10
+
+while [ $COUNTER -lt $TOTALBLOCKS ]; do
+    echo The current progress is $COUNTER/$TOTALBLOCKS
+    let COUNTER=$(hashrentalcoin-cli getblockcount)
+    sleep 5
+done
+echo "Sync complete"
+if [ -n "$2" ]; then
+    echo "Saving IP"
 fi
-if [[ $EUID -ne 0 ]]; then
-   echo -e "${RED}$0 must be run as root.${NC}"
-   exit 1
-fi
-if [ -n "$(pidof $COIN_DAEMON)" ] || [ -e "$COIN_DAEMOM" ] ; then
-  echo -e "${RED}$COIN_NAME is already installed.${NC}"
-  exit 1
-fi
-}
-function prepare_system() {
-echo -e "Preparing the system to install ${GREEN}$COIN_NAME${NC} master node."
-echo -e "This might take 15-20 minutes and the screen will not move, so please be patient."
-apt-get update >/dev/null 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get update > /dev/null 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" -y -qq upgrade >/dev/null 2>&1
-apt install -y software-properties-common >/dev/null 2>&1
-echo -e "${GREEN}Adding bitcoin PPA repository"
-apt-add-repository -y ppa:bitcoin/bitcoin >/dev/null 2>&1
-echo -e "Installing required packages, it may take some time to finish.${NC}"
-apt-get update >/dev/null 2>&1
-apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" make software-properties-common \
-build-essential libtool autoconf libssl-dev libboost-dev libboost-chrono-dev libboost-filesystem-dev libboost-program-options-dev \
-libboost-system-dev libboost-test-dev libboost-thread-dev sudo automake git wget curl libdb4.8-dev bsdmainutils libdb4.8++-dev \
-libminiupnpc-dev libgmp3-dev ufw pkg-config libevent-dev  libdb5.3++>/dev/null 2>&1
-if [ "$?" -gt "0" ];
-  then
-    echo -e "${RED}Not all required packages were installed properly. Try to install them manually by running the following commands:${NC}\n"
-    echo "apt-get update"
-    echo "apt -y install software-properties-common"
-    echo "apt-add-repository -y ppa:bitcoin/bitcoin"
-    echo "apt-get update"
-    echo "apt install -y make build-essential libtool software-properties-common autoconf libssl-dev libboost-dev libboost-chrono-dev libboost-filesystem-dev \
-libboost-program-options-dev libboost-system-dev libboost-test-dev libboost-thread-dev sudo automake git curl libdb4.8-dev \
-bsdmainutils libdb4.8++-dev libminiupnpc-dev libgmp3-dev ufw fail2ban pkg-config libevent-dev"
- exit 1
-fi
-clear
-}
-function important_information() {
- echo
- echo -e "================================================================================================================================"
- echo -e "$COIN_NAME Masternode is up and running listening on port ${RED}$COIN_PORT${NC}."
- echo -e "Configuration file is: ${RED}$CONFIGFOLDER/$CONFIG_FILE${NC}"
- echo -e "Start: ${RED}systemctl start $COIN_NAME.service${NC}"
- echo -e "Stop: ${RED}systemctl stop $COIN_NAME.service${NC}"
- echo -e "VPS_IP:PORT ${RED}$NODEIP:$COIN_PORT${NC}"
- echo -e "MASTERNODE PRIVATEKEY is: ${RED}$COINKEY${NC}"
- if [[ -n $SENTINEL_REPO  ]]; then
-  echo -e "${RED}Sentinel${NC} is installed in ${RED}/sentinel${NC}"
-  echo -e "Sentinel logs is: ${RED}$CONFIGFOLDER/sentinel.log${NC}"
- fi
- echo -e "Please check ${RED}$COIN_NAME${NC} is running with the following command: ${RED}systemctl status $COIN_NAME.service${NC}"
- echo -e "================================================================================================================================"
-}
-function setup_node() {
-  get_ip
-  create_config
-  create_key
-  update_config
-  enable_firewall
-  install_sentinel
-  important_information
-  configure_systemd
-}
-##### Main #####
-clear
-checks
-prepare_system
-compile_node
-setup_node
