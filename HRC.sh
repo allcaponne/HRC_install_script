@@ -1,5 +1,4 @@
 #!/bin/bash
-
 TMP_FOLDER=$(mktemp -d)
 CONFIG_FILE='hashrentalcoin.conf'
 CONFIGFOLDER='/root/.hashrentalcoincore'
@@ -9,16 +8,10 @@ COIN_REPO='https://github.com/allcaponne/HRC_install_script/blob/master/HRC.tar.
 SENTINEL_REPO='https://github.com/HashRentalCoin/sentinel'
 COIN_NAME='hashrentalcoin'
 COIN_PORT=7883
-
-
 NODEIP=$(curl -s4 icanhazip.com)
-
-
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 NC='\033[0m'
-
-
 function install_sentinel() {
   echo -e "${GREEN}Install sentinel.${NC}"
   apt-get -y install python-virtualenv virtualenv >/dev/null 2>&1
@@ -31,8 +24,6 @@ function install_sentinel() {
   rm $CONFIGFOLDER/$COIN_NAME.cron >/dev/null 2>&1
   cd -
 }
-
-
 function compile_node() {
   echo -e "Prepare to download $COIN_NAME"
   cd $TMP_FOLDER
@@ -48,34 +39,27 @@ function compile_node() {
   rm -rf $TMP_FOLDER >/dev/null 2>&1
   clear
 }
-
 function configure_systemd() {
   cat << EOF > /etc/systemd/system/$COIN_NAME.service
 [Unit]
 Description=$COIN_NAME service
 After=network.target
-
 [Service]
 User=root
 Group=root
-
 Type=forking
 #PIDFile=$CONFIGFOLDER/$COIN_NAME.pid
-
 ExecStart=$COIN_DAEMON -conf=$CONFIGFOLDER/$CONFIG_FILE -datadir=$CONFIGFOLDER
 ExecStop=-$COIN_CLI -conf=$CONFIGFOLDER/$CONFIG_FILE -datadir=$CONFIGFOLDER stop
-
 Restart=always
 PrivateTmp=true
 TimeoutStopSec=60s
 TimeoutStartSec=10s
 StartLimitInterval=120s
 StartLimitBurst=5
-
 [Install]
 WantedBy=multi-user.target
 EOF
-
   systemctl daemon-reload
   sleep 3
   systemctl start $COIN_NAME.service
@@ -89,8 +73,6 @@ EOF
     exit 1
   fi
 }
-
-
 function create_config() {
   mkdir $CONFIGFOLDER >/dev/null 2>&1
   RPCUSER=$(tr -cd '[:alnum:]' < /dev/urandom | fold -w10 | head -n1)
@@ -105,7 +87,6 @@ daemon=1
 port=$COIN_PORT
 EOF
 }
-
 function create_key() {
   echo -e "Enter your ${RED}$COIN_NAME Masternode Private Key${NC}. Leave it blank to generate a new ${RED}Masternode Private Key${NC} for you:"
   read -e COINKEY
@@ -127,7 +108,6 @@ function create_key() {
 fi
 clear
 }
-
 function update_config() {
   cat << EOF >> $CONFIGFOLDER/$CONFIG_FILE
 maxconnections=256
@@ -143,8 +123,6 @@ addnode=46.98.69.186
 addnode=31.23.137.65
 EOF
 }
-
-
 function enable_firewall() {
   echo -e "Installing and setting up firewall to allow ingress on port ${GREEN}$COIN_PORT${NC}"
   ufw allow $COIN_PORT/tcp comment "$COIN_NAME MN port" >/dev/null
@@ -153,16 +131,12 @@ function enable_firewall() {
   ufw default allow outgoing >/dev/null 2>&1
   echo "y" | ufw enable >/dev/null 2>&1
 }
-
-
-
 function get_ip() {
   declare -a NODE_IPS
   for ips in $(netstat -i | awk '!/Kernel|Iface|lo/ {print $1," "}')
   do
     NODE_IPS+=($(curl --interface $ips --connect-timeout 2 -s4 icanhazip.com))
   done
-
   if [ ${#NODE_IPS[@]} -gt 1 ]
     then
       echo -e "${GREEN}More than one IP. Please type 0 to use the first IP, 1 for the second and so on...${NC}"
@@ -178,8 +152,6 @@ function get_ip() {
     NODEIP=${NODE_IPS[0]}
   fi
 }
-
-
 function compile_error() {
 if [ "$?" -gt "0" ];
  then
@@ -187,25 +159,20 @@ if [ "$?" -gt "0" ];
   exit 1
 fi
 }
-
-
 function checks() {
 if [[ $(lsb_release -d) != *16.04* ]]; then
   echo -e "${RED}You are not running Ubuntu 16.04. Installation is cancelled.${NC}"
   exit 1
 fi
-
 if [[ $EUID -ne 0 ]]; then
    echo -e "${RED}$0 must be run as root.${NC}"
    exit 1
 fi
-
 if [ -n "$(pidof $COIN_DAEMON)" ] || [ -e "$COIN_DAEMOM" ] ; then
   echo -e "${RED}$COIN_NAME is already installed.${NC}"
   exit 1
 fi
 }
-
 function prepare_system() {
 echo -e "Preparing the system to install ${GREEN}$COIN_NAME${NC} master node."
 echo -e "This might take 15-20 minutes and the screen will not move, so please be patient."
@@ -233,11 +200,8 @@ libboost-program-options-dev libboost-system-dev libboost-test-dev libboost-thre
 bsdmainutils libdb4.8++-dev libminiupnpc-dev libgmp3-dev ufw fail2ban pkg-config libevent-dev"
  exit 1
 fi
-
 clear
 }
-
-
 function important_information() {
  echo
  echo -e "================================================================================================================================"
@@ -254,7 +218,6 @@ function important_information() {
  echo -e "Please check ${RED}$COIN_NAME${NC} is running with the following command: ${RED}systemctl status $COIN_NAME.service${NC}"
  echo -e "================================================================================================================================"
 }
-
 function setup_node() {
   get_ip
   create_config
@@ -265,11 +228,8 @@ function setup_node() {
   important_information
   configure_systemd
 }
-
-
 ##### Main #####
 clear
-
 checks
 prepare_system
 compile_node
