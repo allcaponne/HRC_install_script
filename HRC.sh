@@ -1,5 +1,5 @@
 #!/bin/bash
-TMP_FOLDER=$(mktemp -d)
+TMP_FOLDER='hashrentalcoincore'
 CONFIG_FILE='hashrentalcoin.conf'
 CONFIGFOLDER='/root/.hashrentalcoincore'
 COIN_DAEMON='/usr/local/bin/hashrentalcoind'
